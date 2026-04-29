@@ -68,6 +68,27 @@ def crop():
         "size": len(cropped)
     })
 
+@app.route("/crop-binary", methods=["GET"])
+def crop_binary():
+    """
+    GET /crop-binary?url=https://...
+    Gibt gecroptes JPEG direkt als Binary zurück.
+    Make.com http:ActionGetFile kann das direkt als Datei nutzen.
+    """
+    url = request.args.get("url", "").strip()
+    if not url:
+        return "No URL provided", 400
+
+    resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
+    if resp.status_code != 200:
+        return f"Download failed: {resp.status_code}", 400
+
+    cropped = autocrop(resp.content)
+    return cropped, 200, {
+        "Content-Type": "image/jpeg",
+        "Content-Disposition": "inline; filename=cropped.jpg"
+    }
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
