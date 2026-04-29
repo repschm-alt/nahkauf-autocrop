@@ -2,12 +2,23 @@ from flask import Flask, request, jsonify, make_response
 from PIL import Image
 import io, requests as req
 
+# Deactivate PIL bomb detection for large scans
+Image.MAX_IMAGE_PIXELS = None
+
 app = Flask(__name__)
 
 CLICKUP_TOKEN = 'pk_296503090_8Z5MEPU1UOPSAJQP6I56UXTKE1P5MQHG'
 
-def autocrop(image_bytes, bg_tolerance=20, border=15):
+
+def autocrop(image_bytes, bg_tolerance=20, border=15, max_size=4000):
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    # Resize if too large to avoid memory issues
+    w, h = img.size
+    if w > max_size or h > max_size:
+        ratio = min(max_size / w, max_size / h)
+        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
+
     pixels = img.load()
     w, h = img.size
 
@@ -39,12 +50,21 @@ def autocrop(image_bytes, bg_tolerance=20, border=15):
             break
 
     if left >= right or top >= bottom:
-        return image_bytes
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=92)
+        return out.getvalue()
 
     cropped = img.crop((left, top, right, bottom))
     out = io.BytesIO()
-    cropped.save(out, format="JPEG", quality=95)
+    cropped.save(out, format="JPEG", quality=92)
     return out.getvalue()
+
+
+def fetch_and_crop(url):
+    resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
+    if resp.status_code != 200:
+        return None, f"Download failed: {resp.status_code}"
+    return autocrop(resp.content), None
 
 
 @app.route("/")
@@ -55,8 +75,9 @@ def health():
 @app.route("/crop", methods=["GET", "POST"])
 def crop():
     """
-    GET /crop?url=https://...  -> cropped JPEG binary
-    GET /crop?task_id=XXX&index=0  -> fetch from ClickUp and crop
+    GET /crop?url=https://...              -> cropped JPEG
+    GET /crop?task_id=XXX&index=0          -> fetch from ClickUp + crop
+    POST /crop  {"url": "..."}             -> cropped JPEG
     """
     if request.method == "GET":
         url = request.args.get("url", "").strip()
@@ -68,14 +89,13 @@ def crop():
         task_id = data.get("task_id", "").strip()
         index = int(data.get("index", 0))
 
-    # Option A: direkte URL
+    # Option A: direct URL
     if url:
-        resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
-        if resp.status_code != 200:
-            return f"Download failed: {resp.status_code}", 400
-        image_bytes = resp.content
+        cropped, error = fetch_and_crop(url)
+        if error:
+            return error, 400
 
-    # Option B: ClickUp Task + Index
+    # Option B: ClickUp task_id + attachment index
     elif task_id:
         r = req.get(
             f"https://api.clickup.com/api/v2/task/{task_id}?include_subtasks=true",
@@ -84,24 +104,22 @@ def crop():
         )
         if r.status_code != 200:
             return f"ClickUp API failed: {r.status_code}", 400
-        
+
         attachments = r.json().get("attachments", [])
         if index >= len(attachments):
-            return f"No attachment at index {index}", 400
-        
+            return f"No attachment at index {index} (total: {len(attachments)})", 400
+
         att_url = attachments[index].get("url", "")
         if not att_url:
             return "No URL in attachment", 400
-        
-        resp = req.get(att_url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
-        if resp.status_code != 200:
-            return f"Attachment download failed: {resp.status_code}", 400
-        image_bytes = resp.content
+
+        cropped, error = fetch_and_crop(att_url)
+        if error:
+            return error, 400
 
     else:
-        return "No URL or task_id provided", 400
+        return "No url or task_id provided", 400
 
-    cropped = autocrop(image_bytes)
     response = make_response(cropped)
     response.headers["Content-Type"] = "image/jpeg"
     response.headers["Content-Disposition"] = "inline; filename=cropped.jpg"
