@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from PIL import Image
 import io, base64, requests as req
 
@@ -45,49 +45,41 @@ def autocrop(image_bytes, bg_tolerance=20, border=15):
     return out.getvalue()
 
 
+def download_and_crop(url):
+    resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
+    if resp.status_code != 200:
+        return None, f"Download failed: {resp.status_code}"
+    return autocrop(resp.content), None
+
+
 @app.route("/")
 def health():
     return jsonify({"status": "ok", "service": "nahkauf-autocrop"})
 
 
-@app.route("/crop", methods=["POST"])
+@app.route("/crop", methods=["GET", "POST"])
 def crop():
-    data = request.get_json(force=True)
-    url = data.get("url", "").strip()
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
-
-    resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
-    if resp.status_code != 200:
-        return jsonify({"error": f"Download failed: {resp.status_code}"}), 400
-
-    cropped = autocrop(resp.content)
-    return jsonify({
-        "data": base64.b64encode(cropped).decode(),
-        "content_type": "image/jpeg",
-        "size": len(cropped)
-    })
-
-@app.route("/crop-binary", methods=["GET"])
-def crop_binary():
     """
-    GET /crop-binary?url=https://...
-    Gibt gecroptes JPEG direkt als Binary zurück.
-    Make.com http:ActionGetFile kann das direkt als Datei nutzen.
+    GET  /crop?url=https://...  -> gibt JPEG binary zurueck (fuer http:ActionGetFile)
+    POST /crop  {"url": "..."}  -> gibt JPEG binary zurueck (fuer http:ActionGetFile)
     """
-    url = request.args.get("url", "").strip()
+    if request.method == "GET":
+        url = request.args.get("url", "").strip()
+    else:
+        data = request.get_json(force=True) or {}
+        url = data.get("url", "").strip()
+
     if not url:
         return "No URL provided", 400
 
-    resp = req.get(url, timeout=30, headers={"User-Agent": "NahkaufBot/1.0"})
-    if resp.status_code != 200:
-        return f"Download failed: {resp.status_code}", 400
+    cropped, error = download_and_crop(url)
+    if error:
+        return error, 400
 
-    cropped = autocrop(resp.content)
-    return cropped, 200, {
-        "Content-Type": "image/jpeg",
-        "Content-Disposition": "inline; filename=cropped.jpg"
-    }
+    response = make_response(cropped)
+    response.headers["Content-Type"] = "image/jpeg"
+    response.headers["Content-Disposition"] = "inline; filename=cropped.jpg"
+    return response
 
 
 if __name__ == "__main__":
